@@ -1,5 +1,7 @@
 jax
 jaxlib
 numpy
+tensorflow
+tensorflow_datasets
 http://github.com/SamuelMarks/ml-params/zipball/master#egg=ml_params
 http://github.com/SamuelMarks/ml-prepare/zipball/master#egg=ml_prepare

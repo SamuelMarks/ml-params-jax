@@ -1,17 +1,17 @@
 """ Implementation of ml_params API """
 
-# Mostly based off https://github.com/google/jax/blob/6aa8f24/examples/spmd_mnist_classifier_fromscratch.py
-import time
 from collections import deque
+from operator import itemgetter
 from os import path
 from sys import stdout
+# Mostly based off https://github.com/google/jax/blob/6aa8f24/examples/spmd_mnist_classifier_fromscratch.py
+from time import time
 from typing import Tuple
 
 import numpy as np
 import tensorflow as tf
 from jax import tree_map
 from ml_params.base import BaseTrainer
-from ml_prepare.exectors import build_tfds_dataset
 
 from ml_params_jax import get_logger
 from ml_params_jax.datasets import load_data_from_jax_tfds_or_ml_prepare
@@ -161,14 +161,14 @@ class JAXTrainer(BaseTrainer):
         replicated_params, spmd_update = self.model(step_size, param_scale, layer_sizes, self.num_devices)
 
         for epoch in range(epochs):
-            start_time = time.time()
+            start_time = time()
             for _ in range(self.num_batches):
                 replicated_params = spmd_update(replicated_params, next(batches))
-            epoch_time = time.time() - start_time
+            epoch_time = time() - start_time
 
             # We evaluate using the jitted `accuracy` function (not using pmap) by
             # grabbing just one of the replicated parameter values.
-            params = tree_map(lambda x: x[0], replicated_params)
+            params = tree_map(itemgetter(0), replicated_params)
 
             if metric_emit_freq(epoch):
                 def output_metric(met_name_met_fun):
@@ -183,6 +183,6 @@ class JAXTrainer(BaseTrainer):
                 deque(map(output_metric, metrics), maxlen=0)
 
 
-del Tuple, build_tfds_dataset, get_logger
+del path, stdout, Tuple, np, tf, BaseTrainer, get_logger, load_data_from_jax_tfds_or_ml_prepare, accuracy, logger
 
 __all__ = ['JAXTrainer']

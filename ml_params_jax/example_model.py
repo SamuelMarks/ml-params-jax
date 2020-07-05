@@ -1,11 +1,6 @@
 import numpy as np
-import numpy.random as npr
-
-from jax import jit, grad, pmap, partial
-from jax.scipy.special import logsumexp
-from jax.lib import xla_bridge
+from jax import grad, pmap, partial, lax
 from jax.tree_util import tree_map
-from jax import lax
 
 from ml_params_jax.spmd_mnist_classifier_fromscratch import init_random_params, loss
 

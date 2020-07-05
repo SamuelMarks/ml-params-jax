@@ -1,93 +1,75 @@
-# Unedited from this hash https://github.com/google/jax/blob/6aa8f24/examples/datasets.py
-#
-# Copyright 2018 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import numpy.random as npr
+from jax.lib import xla_bridge
+from ml_params.datasets import load_data_from_ml_prepare
+from ml_prepare.datasets import datasets2classes
 
-"""Datasets used in examples."""
-
-import array
-import gzip
-import os
-import struct
-import urllib.request
-from os import path
-
-import numpy as np
-
-_DATA = "/tmp/jax_example_data/"
+import ml_params_jax.stolen.datasets
 
 
-def _download(url, filename):
-    """Download a url to a file in the JAX data temp directory."""
-    if not path.exists(_DATA):
-        os.makedirs(_DATA)
-    out_file = path.join(_DATA, filename)
-    if not path.isfile(out_file):
-        urllib.request.urlretrieve(url, out_file)
-        print("downloaded {} to {}".format(url, _DATA))
+def load_data_from_jax_tfds_or_ml_prepare(dataset_name, tfds_dir=None,
+                                          K=None, as_numpy=False, batch_size=128, **data_loader_kwargs):
+    """
+    Acquire from the official TFDS model zoo through JAX wrapper, or the ophthalmology focussed ml-prepare library
 
+    :param dataset_name: name of dataset
+    :type dataset_name: ```str```
 
-def _partial_flatten(x):
-    """Flatten all but the first dimension of an ndarray."""
-    return np.reshape(x, (x.shape[0], -1))
+    :param tfds_dir: directory to look for models in. Default is ~/tensorflow_datasets.
+    :type tfds_dir: ```None or str```
 
+    :param K: backend engine, e.g., `np` or `tf`
+    :type K: ```None or np or tf or Any```
 
-def _one_hot(x, k, dtype=np.float32):
-    """Create a one-hot encoding of x of size k."""
-    return np.array(x[:, None] == np.arange(k), dtype)
+    :param as_numpy: Convert to numpy ndarrays
+    :type as_numpy: ```bool```
 
+    :param data_loader_kwargs: pass this as arguments to data_loader function
+    :type data_loader_kwargs: ```**data_loader_kwargs```
 
-def mnist_raw():
-    """Download and parse the raw MNIST dataset."""
-    # CVDF mirror of http://yann.lecun.com/exdb/mnist/
-    base_url = "https://storage.googleapis.com/cvdf-datasets/mnist/"
+    :return: Train and tests dataset splits
+    :rtype: ```Tuple[tf.data.Dataset, tf.data.Dataset] or Tuple[np.ndarray, np.ndarray]```
+    """
 
-    def parse_labels(filename):
-        with gzip.open(filename, "rb") as fh:
-            _ = struct.unpack(">II", fh.read(8))
-            return np.array(array.array("B", fh.read()), dtype=np.uint8)
+    data_loader_kwargs.update({
+        'dataset_name': dataset_name,
+        'tfds_dir': tfds_dir,
 
-    def parse_images(filename):
-        with gzip.open(filename, "rb") as fh:
-            _, num_data, rows, cols = struct.unpack(">IIII", fh.read(16))
-            return np.array(array.array("B", fh.read()),
-                            dtype=np.uint8).reshape(num_data, rows, cols)
+    })
+    if 'scale' not in data_loader_kwargs:
+        data_loader_kwargs['scale'] = 255
 
-    for filename in ["train-images-idx3-ubyte.gz", "train-labels-idx1-ubyte.gz",
-                     "t10k-images-idx3-ubyte.gz", "t10k-labels-idx1-ubyte.gz"]:
-        _download(base_url + filename, filename)
+    if dataset_name in datasets2classes:
+        return load_data_from_ml_prepare(dataset_name=dataset_name,
+                                         tfds_dir=tfds_dir,
+                                         **data_loader_kwargs)
+    else:
+        ml_params_jax.stolen.datasets._DATA = tfds_dir
+        train_images, train_labels, test_images, test_labels = getattr(ml_params_jax.stolen.datasets,
+                                                                       dataset_name)()
+        num_train = train_images.shape[0]
+        num_complete_batches, leftover = divmod(num_train, batch_size)
+        num_batches = num_complete_batches + bool(leftover)
 
-    train_images = parse_images(path.join(_DATA, "train-images-idx3-ubyte.gz"))
-    train_labels = parse_labels(path.join(_DATA, "train-labels-idx1-ubyte.gz"))
-    test_images = parse_images(path.join(_DATA, "t10k-images-idx3-ubyte.gz"))
-    test_labels = parse_labels(path.join(_DATA, "t10k-labels-idx1-ubyte.gz"))
+        # For this manual SPMD example, we get the number of devices (e.g. GPUs or
+        # TPU cores) that we're using, and use it to reshape data minibatches.
+        num_devices = xla_bridge.device_count()
 
-    return train_images, train_labels, test_images, test_labels
+        def data_stream():
+            rng = npr.RandomState(0)
+            while True:
+                perm = rng.permutation(num_train)
+                for i in range(num_batches):
+                    batch_idx = perm[i * batch_size:(i + 1) * batch_size]
+                    images, labels = train_images[batch_idx], train_labels[batch_idx]
+                    # For this SPMD example, we reshape the data batch dimension into two
+                    # batch dimensions, one of which is mapped over parallel devices.
+                    batch_size_per_device, ragged = divmod(images.shape[0], num_devices)
+                    if ragged:
+                        msg = "batch size must be divisible by device count, got {} and {}."
+                        raise ValueError(msg.format(batch_size, num_devices))
+                    shape_prefix = (num_devices, batch_size_per_device)
+                    images = images.reshape(shape_prefix + images.shape[1:])
+                    labels = labels.reshape(shape_prefix + labels.shape[1:])
+                    yield images, labels
 
-
-def mnist(permute_train=False):
-    """Download, parse and process MNIST data to unit scale and one-hot labels."""
-    train_images, train_labels, test_images, test_labels = mnist_raw()
-
-    train_images = _partial_flatten(train_images) / np.float32(255.)
-    test_images = _partial_flatten(test_images) / np.float32(255.)
-    train_labels = _one_hot(train_labels, 10)
-    test_labels = _one_hot(test_labels, 10)
-
-    if permute_train:
-        perm = np.random.RandomState(0).permutation(train_images.shape[0])
-        train_images = train_images[perm]
-        train_labels = train_labels[perm]
-
-    return train_images, train_labels, test_images, test_labels
+        return data_stream(), num_batches, num_devices, train_images, train_labels, test_images, test_labels
